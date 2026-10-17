@@ -62,6 +62,9 @@ input,select{font:inherit;color:inherit;background:var(--bg);border:1px solid va
 .note{font-size:13px;color:var(--mute)}
 #toast{position:fixed;left:50%;bottom:calc(140px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:999px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:9}
 #toast.show{opacity:1}
+.loansv #prev,.loansv #next{visibility:hidden}
+.row small.note{display:block;margin-top:4px}
+.big2{font-size:30px;font-weight:700;letter-spacing:-.5px}
 </style>
 </head>
 <body>
@@ -78,7 +81,7 @@ input,select{font:inherit;color:inherit;background:var(--bg);border:1px solid va
 </div>
 <button id="fab" aria-label="Add">+</button>
 <nav><div class="in">
-  <button data-v="day">Day</button><button data-v="month">Month</button><button data-v="year">Year</button>
+  <button data-v="day">Day</button><button data-v="month">Month</button><button data-v="year">Year</button><button data-v="loans">Loans</button>
 </div></nav>
 
 <div class="sheet" id="sheet" hidden><div class="panel">
@@ -101,14 +104,24 @@ input,select{font:inherit;color:inherit;background:var(--bg);border:1px solid va
   <div class="btns"><button id="expjson">Backup (JSON)</button><button id="expcsv">Export CSV</button></div>
   <div class="btns"><button id="imp">Restore backup</button></div>
   <input type="file" id="file" accept=".json,application/json" hidden>
-  <p class="note">Your data lives only in this browser on this phone. Clearing site data or uninstalling can erase it, so back up now and then.</p>
+  <p class="note">Your data (including loans) lives only in this browser on this phone. Clearing site data or uninstalling can erase it, so back up now and then.</p>
   <div class="btns"><button id="closemenu" class="primary">Done</button></div>
 </div></div>
+<div class="sheet" id="lsheet" hidden><div class="panel">
+  <div class="seg" id="lseg"><button data-d="lent">I lent</button><button data-d="borrowed">I borrowed</button></div>
+  <input id="lperson" placeholder="Person" maxlength="40" autocomplete="off">
+  <input id="lamt" inputmode="decimal" placeholder="Amount" autocomplete="off" style="font-size:28px;font-weight:700">
+  <input id="lnote" placeholder="Note (optional)" maxlength="80" autocomplete="off">
+  <input id="ldate" type="date">
+  <div class="btns"><button id="lcancel">Cancel</button><button id="lsave" class="primary">Save</button></div>
+</div></div>
+
+<div class="sheet" id="dsheet" hidden><div class="panel" id="dbody"></div></div>
 <div id="toast"></div>
 
 <script>
 (()=>{
-const KEY='ledger.v1',CKEY='ledger.cur';
+const KEY='ledger.v1',CKEY='ledger.cur',LKEY='ledger.loans.v1';
 const CATS={expense:['Food','Transport','Rent','Bills','Shopping','Health','Fun','Education','Other'],income:['Salary','Allowance','Freelance','Gift','Other']};
 const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const DOW=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -120,13 +133,16 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 const nf=new Intl.NumberFormat('en-IN',{maximumFractionDigits:2});
 let tx=[],cur='₹',view='day',cursor=new Date(),editing=null,form={type:'expense',cat:'Food'};
 cursor.setHours(12,0,0,0);
+let loans=[],ledit=null,lf={dir:'lent'},dcur=null;
 const money=n=>cur+nf.format(n);
 
 function load(){
   try{tx=JSON.parse(localStorage.getItem(KEY)||'[]');if(!Array.isArray(tx))tx=[]}catch(e){tx=[]}
   try{cur=localStorage.getItem(CKEY)||'₹'}catch(e){}
+  try{loans=JSON.parse(localStorage.getItem(LKEY)||'[]');if(!Array.isArray(loans))loans=[]}catch(e){loans=[]}
 }
 function save(){try{localStorage.setItem(KEY,JSON.stringify(tx))}catch(e){toast('Could not save')}}
+function saveLoans(){try{localStorage.setItem(LKEY,JSON.stringify(loans))}catch(e){toast('Could not save')}}
 let tt;function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(tt);tt=setTimeout(()=>t.classList.remove('show'),1800)}
 
 const keyOf=()=>view==='day'?iso(cursor):view==='month'?iso(cursor).slice(0,7):String(cursor.getFullYear());
@@ -159,6 +175,8 @@ function yearHtml(list){
   return `<h3>By month</h3><div class="card">`+arr.map(a=>`<button class="row" data-month="${a.p}" style="display:block"><div style="display:flex;justify-content:space-between"><span>${MON[a.m]}</span><span><b class="exp">${a.exp?money(a.exp):'—'}</b>${a.inc?` <small class="inc">+${money(a.inc)}</small>`:''}</span></div><div class="bar"><i style="width:${(a.exp/max*100).toFixed(1)}%"></i></div></button>`).join('')+`</div>`;
 }
 function render(){
+  $('#app').classList.toggle('loansv',view==='loans');
+  if(view==='loans')return renderLoans();
   const key=keyOf();
   const list=tx.filter(t=>t.date.startsWith(key)).sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id);
   const s=sum(list);
@@ -171,6 +189,61 @@ function render(){
   if(view==='year')h=list.length?yearHtml(list)+catHtml(list):'';
   $('#content').innerHTML=h||`<div class="empty">Nothing here yet.<br>Tap + to add one.</div>`;
   document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===view));
+}
+
+const fmt=d=>{const t=parse(d);return t.getDate()+' '+MON[t.getMonth()]+' '+t.getFullYear()};
+const paid=l=>l.payments.reduce((a,p)=>a+p.amount,0);
+const left=l=>Math.round((l.amount-paid(l))*100)/100;
+function loanRow(l){
+  const r=left(l),p=paid(l);
+  return `<button class="row" data-loan="${l.id}" style="display:block"><div style="display:flex;align-items:center;gap:12px"><span class="dot">${esc(l.person.slice(0,2).toUpperCase())}</span><span class="t"><div>${esc(l.person)}</div><small>${l.note?esc(l.note)+' · ':''}${fmt(l.date)}</small></span><span class="a ${l.dir==='lent'?'inc':'exp'}">${money(r)}</span></div>${p>0&&r>0?`<div class="bar"><i style="width:${(p/l.amount*100).toFixed(1)}%"></i></div><small class="note">${money(p)} of ${money(l.amount)} returned</small>`:''}</button>`;
+}
+function renderLoans(){
+  const open=loans.filter(l=>left(l)>0).sort((a,b)=>a.date.localeCompare(b.date));
+  const done=loans.filter(l=>left(l)<=0).sort((a,b)=>b.date.localeCompare(a.date));
+  const lent=open.filter(l=>l.dir==='lent'),bor=open.filter(l=>l.dir==='borrowed');
+  const tot=a=>Math.round(a.reduce((s,l)=>s+left(l),0)*100)/100;
+  $('#label').textContent='Loans';
+  $('#sum').innerHTML=`<div class="cap">To get back</div><div class="big" style="color:var(--inc)">${money(tot(lent))}</div>
+    <div class="two"><div><span class="cap">I owe</span><b class="exp">${money(tot(bor))}</b></div><div><span class="cap">People pending</span><b>${new Set(lent.map(l=>l.person.trim().toLowerCase())).size}</b></div></div>`;
+  const sec=(t,a)=>a.length?`<h3>${t}</h3><div class="card">${a.map(loanRow).join('')}</div>`:'';
+  $('#content').innerHTML=(sec('Money I lent',lent)+sec('Money I borrowed',bor)+sec('Settled',done))||`<div class="empty">No loans yet.<br>Tap + to add one.</div>`;
+  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===view));
+}
+function drawLF(){document.querySelectorAll('#lseg button').forEach(b=>b.classList.toggle('on',b.dataset.d===lf.dir))}
+function openLoanForm(l){
+  ledit=l||null;lf={dir:l?l.dir:'lent'};
+  $('#lperson').value=l?l.person:'';
+  $('#lamt').value=l?l.amount:'';
+  $('#lnote').value=l?l.note:'';
+  $('#ldate').value=l?l.date:iso(new Date());
+  drawLF();$('#lsheet').hidden=false;
+  setTimeout(()=>$('#lperson').focus(),50);
+}
+function saveLoanForm(){
+  const person=$('#lperson').value.trim();
+  const amount=Math.round(parseFloat(String($('#lamt').value).replace(/,/g,''))*100)/100;
+  const date=$('#ldate').value;
+  if(!person){toast('Enter a name');return}
+  if(!(amount>0)){toast('Enter an amount');return}
+  if(!date){toast('Pick a date');return}
+  if(ledit&&amount<paid(ledit)){toast('Less than already repaid');return}
+  const rec={dir:lf.dir,person,amount,note:$('#lnote').value.trim(),date};
+  if(ledit)Object.assign(ledit,rec);else loans.push({id:Date.now(),...rec,payments:[]});
+  saveLoans();$('#lsheet').hidden=true;ledit=null;render();
+}
+function openDetail(id){
+  dcur=loans.find(l=>String(l.id)===String(id));
+  if(!dcur)return;
+  drawDetail();$('#dsheet').hidden=false;
+}
+function drawDetail(){
+  const l=dcur,r=left(l);
+  $('#dbody').innerHTML=`<div><div style="font-size:20px;font-weight:700">${esc(l.person)}</div><div class="note">${l.dir==='lent'?'I lent':'I borrowed'} ${money(l.amount)} · ${fmt(l.date)}${l.note?' · '+esc(l.note):''}</div></div>
+  <div><div class="cap note">${r>0?(l.dir==='lent'?'Still to get back':'Still to pay'):'Settled'}</div><div class="big2 ${l.dir==='lent'?'inc':'exp'}">${money(r)}</div></div>
+  ${l.payments.length?`<div class="card">${l.payments.map(x=>`<div class="row"><span class="t"><div>${fmt(x.date)}</div></span><span class="a">${money(x.amount)}</span><button data-delpay="${x.id}" aria-label="Remove repayment" style="color:var(--mute);padding:0 6px;font-size:20px">×</button></div>`).join('')}</div>`:''}
+  ${r>0?`<input id="pamt" inputmode="decimal" placeholder="${l.dir==='lent'?'Amount received back':'Amount paid back'}" autocomplete="off"><input id="pdate" type="date" value="${iso(new Date())}"><div class="btns"><button id="psettle">Full ${money(r)}</button><button id="prec" class="primary">Record</button></div>`:''}
+  <div class="btns"><button id="dd" class="danger">Delete</button><button id="de">Edit</button><button id="dc">Close</button></div>`;
 }
 
 function shift(dir){
@@ -229,11 +302,16 @@ function importJson(file){
   r.onload=()=>{
     try{
       const d=JSON.parse(r.result);
-      const arr=Array.isArray(d)?d:d.tx;
+      const arr=Array.isArray(d)?d:(Array.isArray(d.tx)?d.tx:[]);
       const ok=arr.filter(t=>t&&/^\d{4}-\d{2}-\d{2}$/.test(t.date)&&t.amount>0&&(t.type==='expense'||t.type==='income')).map((t,i)=>({id:t.id||Date.now()+i,type:t.type,cat:String(t.cat||'Other'),amount:Number(t.amount),note:String(t.note||''),date:t.date}));
       const have=new Set(tx.map(t=>t.id));
       const add=ok.filter(t=>!have.has(t.id));
-      tx=tx.concat(add);save();render();toast('Restored '+add.length+' entries');
+      tx=tx.concat(add);save();
+      const dateOk=x=>/^\d{4}-\d{2}-\d{2}$/.test(x);
+      const la=Array.isArray(d.loans)?d.loans:[];
+      const haveL=new Set(loans.map(l=>l.id));
+      const addL=la.filter(l=>l&&String(l.person||'').trim()&&l.amount>0&&(l.dir==='lent'||l.dir==='borrowed')&&dateOk(l.date)).map((l,i)=>({id:l.id||Date.now()+1000+i,dir:l.dir,person:String(l.person).trim(),amount:Number(l.amount),note:String(l.note||''),date:l.date,payments:(Array.isArray(l.payments)?l.payments:[]).filter(p=>p&&p.amount>0&&dateOk(p.date)).map((p,j)=>({id:p.id||Date.now()+j,amount:Number(p.amount),date:p.date}))})).filter(l=>!haveL.has(l.id));
+      loans=loans.concat(addL);saveLoans();render();toast('Restored '+(add.length+addL.length)+' entries');
     }catch(e){toast('Not a valid backup file')}
   };
   r.readAsText(file);
@@ -241,7 +319,7 @@ function importJson(file){
 
 $('#prev').onclick=()=>shift(-1);
 $('#next').onclick=()=>shift(1);
-$('#fab').onclick=()=>openSheet();
+$('#fab').onclick=()=>view==='loans'?openLoanForm():openSheet();
 $('#more').onclick=()=>{$('#cursel').value=cur;$('#menu').hidden=false};
 $('#closemenu').onclick=()=>$('#menu').hidden=true;
 $('#cancel').onclick=closeSheet;
@@ -252,7 +330,7 @@ $('#cats').onclick=e=>{const b=e.target.closest('button');if(b){form.cat=b.datas
 $('#sheet').onclick=e=>{if(e.target.id==='sheet')closeSheet()};
 $('#menu').onclick=e=>{if(e.target.id==='menu')$('#menu').hidden=true};
 $('#cursel').onchange=e=>{cur=e.target.value;try{localStorage.setItem(CKEY,cur)}catch(x){}render()};
-$('#expjson').onclick=()=>download('ledger-backup-'+iso(new Date())+'.json',JSON.stringify({v:1,tx},null,1),'application/json');
+$('#expjson').onclick=()=>download('ledger-backup-'+iso(new Date())+'.json',JSON.stringify({v:2,tx,loans},null,1),'application/json');
 $('#expcsv').onclick=exportCsv;
 $('#imp').onclick=()=>$('#file').click();
 $('#file').onchange=e=>{if(e.target.files[0])importJson(e.target.files[0]);e.target.value=''};
@@ -264,10 +342,34 @@ $('#content').onclick=e=>{
   const m=e.target.closest('[data-month]');if(m){cursor=parse(m.dataset.month+'-01');view='month';render()}
 };
 
+$('#lseg').onclick=e=>{const b=e.target.closest('button');if(b){lf.dir=b.dataset.d;drawLF()}};
+$('#lcancel').onclick=()=>{$('#lsheet').hidden=true;ledit=null};
+$('#lsheet').onclick=e=>{if(e.target.id==='lsheet'){$('#lsheet').hidden=true;ledit=null}};
+$('#lsave').onclick=saveLoanForm;
+$('#content').addEventListener('click',e=>{const r=e.target.closest('[data-loan]');if(r)openDetail(r.dataset.loan)});
+$('#dsheet').onclick=e=>{
+  if(e.target.id==='dsheet'){$('#dsheet').hidden=true;return}
+  const b=e.target.closest('button');if(!b||!dcur)return;
+  const l=dcur;
+  if(b.id==='dc'){$('#dsheet').hidden=true}
+  else if(b.id==='de'){$('#dsheet').hidden=true;openLoanForm(l)}
+  else if(b.id==='dd'){if(confirm('Delete this loan and its repayments?')){loans=loans.filter(x=>x!==l);saveLoans();$('#dsheet').hidden=true;dcur=null;render()}}
+  else if(b.id==='psettle'){$('#pamt').value=left(l)}
+  else if(b.id==='prec'){
+    const a=Math.round(parseFloat(String($('#pamt').value).replace(/,/g,''))*100)/100,d=$('#pdate').value;
+    if(!(a>0)){toast('Enter an amount');return}
+    if(!d){toast('Pick a date');return}
+    if(a>left(l)){toast('More than the balance');return}
+    l.payments.push({id:Date.now(),amount:a,date:d});
+    saveLoans();drawDetail();render();
+  }
+  else if(b.dataset.delpay){l.payments=l.payments.filter(x=>String(x.id)!==b.dataset.delpay);saveLoans();drawDetail();render()}
+};
+
 load();render();
 try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist()}catch(e){}
 if('serviceWorker' in navigator&&location.protocol.startsWith('http'))navigator.serviceWorker.register('sw.js').catch(()=>{});
-window.__ledger={get tx(){return tx},setView,shift,openSheet,saveForm};
+window.__ledger={get tx(){return tx},get loans(){return loans},setView,shift,openSheet,saveForm};
 })();
 </script>
 </body>
