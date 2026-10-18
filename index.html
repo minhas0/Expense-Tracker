@@ -22,7 +22,7 @@ header .nav:active{background:var(--line)}
 #sum{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;margin-bottom:18px}
 #sum .big{font-size:34px;font-weight:700;letter-spacing:-.5px;color:var(--exp)}
 #sum .cap{font-size:12px;color:var(--mute);text-transform:uppercase;letter-spacing:.06em}
-#sum .two{display:flex;gap:24px;margin-top:12px}
+#sum .two{display:flex;gap:12px 24px;flex-wrap:wrap;margin-top:12px}
 #sum .two b{display:block;font-size:17px}
 .inc{color:var(--inc)}.exp{color:var(--exp)}
 h3{font-size:12px;font-weight:600;color:var(--mute);text-transform:uppercase;letter-spacing:.06em;margin:22px 4px 8px}
@@ -98,13 +98,15 @@ input,select{font:inherit;color:inherit;background:var(--bg);border:1px solid va
 </div></div>
 
 <div class="sheet" id="menu" hidden><div class="panel">
+  <div id="cloud"></div>
   <label class="note">Currency
     <select id="cursel"><option>₹</option><option>$</option><option>€</option><option>£</option></select>
   </label>
   <div class="btns"><button id="expjson">Backup (JSON)</button><button id="expcsv">Export CSV</button></div>
-  <div class="btns"><button id="imp">Restore backup</button></div>
+  <div class="btns"><button id="imp">Restore backup</button><button id="csvbtn">Import bank CSV</button></div>
+  <input type="file" id="csvfile" accept=".csv,text/csv,text/plain" hidden>
   <input type="file" id="file" accept=".json,application/json" hidden>
-  <p class="note">Your data (including loans) lives only in this browser on this phone. Clearing site data or uninstalling can erase it, so back up now and then.</p>
+  <p class="note">Data is always saved on this phone first. Turn on cloud sync above to keep a copy online; without it, clearing site data can erase everything, so back up now and then.</p>
   <div class="btns"><button id="closemenu" class="primary">Done</button></div>
 </div></div>
 <div class="sheet" id="lsheet" hidden><div class="panel">
@@ -119,9 +121,10 @@ input,select{font:inherit;color:inherit;background:var(--bg);border:1px solid va
 <div class="sheet" id="dsheet" hidden><div class="panel" id="dbody"></div></div>
 <div id="toast"></div>
 
+<script src="config.js"></script>
 <script>
 (()=>{
-const KEY='ledger.v1',CKEY='ledger.cur',LKEY='ledger.loans.v1';
+const KEY='ledger.v1',CKEY='ledger.cur',LKEY='ledger.loans.v1',GKEY='ledger.gone.v1';
 const CATS={expense:['Food','Transport','Rent','Bills','Shopping','Health','Fun','Education','Other'],income:['Salary','Allowance','Freelance','Gift','Other']};
 const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const DOW=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -133,16 +136,19 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 const nf=new Intl.NumberFormat('en-IN',{maximumFractionDigits:2});
 let tx=[],cur='₹',view='day',cursor=new Date(),editing=null,form={type:'expense',cat:'Food'};
 cursor.setHours(12,0,0,0);
-let loans=[],ledit=null,lf={dir:'lent'},dcur=null;
+let loans=[],ledit=null,lf={dir:'lent'},dcur=null,gone={};
 const money=n=>cur+nf.format(n);
 
 function load(){
   try{tx=JSON.parse(localStorage.getItem(KEY)||'[]');if(!Array.isArray(tx))tx=[]}catch(e){tx=[]}
   try{cur=localStorage.getItem(CKEY)||'₹'}catch(e){}
   try{loans=JSON.parse(localStorage.getItem(LKEY)||'[]');if(!Array.isArray(loans))loans=[]}catch(e){loans=[]}
+  try{gone=JSON.parse(localStorage.getItem(GKEY)||'{}')||{}}catch(e){gone={}}
+  tx.forEach(t=>{if(!t.u)t.u=Number(t.id)||1});loans.forEach(l=>{if(!l.u)l.u=Number(l.id)||1});
 }
-function save(){try{localStorage.setItem(KEY,JSON.stringify(tx))}catch(e){toast('Could not save')}}
-function saveLoans(){try{localStorage.setItem(LKEY,JSON.stringify(loans))}catch(e){toast('Could not save')}}
+function persist(){try{localStorage.setItem(KEY,JSON.stringify(tx));localStorage.setItem(LKEY,JSON.stringify(loans));localStorage.setItem(GKEY,JSON.stringify(gone))}catch(e){toast('Could not save')}}
+function save(){persist();pushLocal()}
+function saveLoans(){persist();pushLocal()}
 let tt;function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(tt);tt=setTimeout(()=>t.classList.remove('show'),1800)}
 
 const keyOf=()=>view==='day'?iso(cursor):view==='month'?iso(cursor).slice(0,7):String(cursor.getFullYear());
@@ -150,6 +156,28 @@ const labelOf=()=>view==='day'?DOW[cursor.getDay()]+', '+cursor.getDate()+' '+MO
   :view==='month'?MON[cursor.getMonth()]+' '+cursor.getFullYear():String(cursor.getFullYear());
 const sum=l=>l.reduce((a,t)=>{t.type==='income'?a.inc+=t.amount:a.exp+=t.amount;return a},{inc:0,exp:0});
 
+const smoney=n=>(n<0?'−':'')+money(Math.abs(n));
+function loanEvents(){
+  const ev=[];
+  loans.forEach(l=>{
+    const lent=l.dir==='lent';
+    ev.push({id:l.id,date:l.date,amt:lent?-l.amount:l.amount,text:(lent?'Lent to ':'Borrowed from ')+l.person});
+    if(l.payments.length&&left(l)<=0){
+      const last=l.payments.reduce((m,x)=>x.date>m?x.date:m,'');
+      ev.push({id:l.id,date:last,amt:lent?l.amount:-l.amount,text:lent?l.person+' repaid (closed)':'Repaid '+l.person+' (closed)'});
+    }
+  });
+  return ev;
+}
+function balanceAt(end){
+  let b=0;
+  tx.forEach(t=>{if(t.date<=end)b+=t.type==='income'?t.amount:-t.amount});
+  loanEvents().forEach(e=>{if(e.date<=end)b+=e.amt});
+  return Math.round(b*100)/100;
+}
+function evItem(e){
+  return `<button class="row" data-loan="${e.id}"><span class="dot">Ln</span><span class="t"><div>${esc(e.text)}</div><small>Loan · not counted as spending</small></span><span class="a" style="color:var(--mute)">${e.amt<0?'−':'+'}${money(Math.abs(e.amt))}</span></button>`;
+}
 function item(t){
   return `<button class="row" data-id="${t.id}"><span class="dot">${esc(t.cat.slice(0,2))}</span>
   <span class="t"><div>${esc(t.note||t.cat)}</div>${t.note?`<small>${esc(t.cat)}</small>`:''}</span>
@@ -161,11 +189,13 @@ function catHtml(list){
   const tot=e.reduce((a,x)=>a+x[1],0);
   return `<h3>Where it went</h3><div class="card">`+e.map(([c,v])=>`<div class="row" style="display:block"><div style="display:flex;justify-content:space-between"><span>${esc(c)}</span><b>${money(v)}</b></div><div class="bar"><i style="width:${(v/tot*100).toFixed(1)}%"></i></div></div>`).join('')+`</div>`;
 }
-function groupedHtml(list){
-  const g={};list.forEach(t=>(g[t.date]=g[t.date]||[]).push(t));
+function groupedHtml(list,evs){
+  const g={};
+  list.forEach(t=>(g[t.date]=g[t.date]||{t:[],e:[]}).t.push(t));
+  evs.forEach(e=>(g[e.date]=g[e.date]||{t:[],e:[]}).e.push(e));
   return Object.keys(g).sort().reverse().map(d=>{
-    const dt=parse(d),s=sum(g[d]);
-    return `<button class="dayh" data-day="${d}"><span>${DOW[dt.getDay()]}, ${dt.getDate()} ${MON[dt.getMonth()]}</span><span>${s.exp?'−'+money(s.exp):''}</span></button><div class="card">${g[d].map(item).join('')}</div>`;
+    const dt=parse(d),x=sum(g[d].t);
+    return `<button class="dayh" data-day="${d}"><span>${DOW[dt.getDay()]}, ${dt.getDate()} ${MON[dt.getMonth()]}</span><span>${x.exp?'−'+money(x.exp):''}</span></button><div class="card">${g[d].t.map(item).join('')+g[d].e.map(evItem).join('')}</div>`;
   }).join('');
 }
 function yearHtml(list){
@@ -179,14 +209,19 @@ function render(){
   if(view==='loans')return renderLoans();
   const key=keyOf();
   const list=tx.filter(t=>t.date.startsWith(key)).sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id);
-  const s=sum(list);
+  const end=view==='day'?iso(cursor):view==='month'?key+'-31':key+'-12-31';
+  const incKey=view==='day'?key.slice(0,7):key;
+  const inc=tx.filter(t=>t.type==='income'&&t.date.startsWith(incKey)).reduce((a,t)=>a+t.amount,0);
+  const s=sum(list),bal=balanceAt(end);
+  const evs=loanEvents().filter(e=>e.date.startsWith(key)).sort((a,b)=>b.date.localeCompare(a.date));
   $('#label').textContent=labelOf();
   $('#sum').innerHTML=`<div class="cap">Spent</div><div class="big">${money(s.exp)}</div>
-    <div class="two"><div><span class="cap">Income</span><b class="inc">${money(s.inc)}</b></div><div><span class="cap">Net</span><b>${s.inc-s.exp<0?'−':''}${money(Math.abs(s.inc-s.exp))}</b></div></div>`;
+    <div class="two"><div><span class="cap">Income${view==='day'?' · '+MON[cursor.getMonth()]:''}</span><b class="inc">${money(inc)}</b></div><div><span class="cap">Net balance</span><b class="${bal<0?'exp':''}">${smoney(bal)}</b></div></div>`;
+  const any=list.length||evs.length;
   let h='';
-  if(view==='day')h=list.length?`<div class="card">${list.map(item).join('')}</div>`:'';
-  if(view==='month')h=list.length?catHtml(list)+groupedHtml(list):'';
-  if(view==='year')h=list.length?yearHtml(list)+catHtml(list):'';
+  if(view==='day')h=any?`<div class="card">${list.map(item).join('')+evs.map(evItem).join('')}</div>`:'';
+  if(view==='month')h=any?catHtml(list)+groupedHtml(list,evs):'';
+  if(view==='year')h=any?yearHtml(list)+catHtml(list):'';
   $('#content').innerHTML=h||`<div class="empty">Nothing here yet.<br>Tap + to add one.</div>`;
   document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===view));
 }
@@ -204,8 +239,9 @@ function renderLoans(){
   const lent=open.filter(l=>l.dir==='lent'),bor=open.filter(l=>l.dir==='borrowed');
   const tot=a=>Math.round(a.reduce((s,l)=>s+left(l),0)*100)/100;
   $('#label').textContent='Loans';
+  const nb=balanceAt('9999-12-31');
   $('#sum').innerHTML=`<div class="cap">To get back</div><div class="big" style="color:var(--inc)">${money(tot(lent))}</div>
-    <div class="two"><div><span class="cap">I owe</span><b class="exp">${money(tot(bor))}</b></div><div><span class="cap">People pending</span><b>${new Set(lent.map(l=>l.person.trim().toLowerCase())).size}</b></div></div>`;
+    <div class="two"><div><span class="cap">I owe</span><b class="exp">${money(tot(bor))}</b></div><div><span class="cap">People pending</span><b>${new Set(lent.map(l=>l.person.trim().toLowerCase())).size}</b></div><div><span class="cap">Net balance</span><b class="${nb<0?'exp':''}">${smoney(nb)}</b></div></div>`;
   const sec=(t,a)=>a.length?`<h3>${t}</h3><div class="card">${a.map(loanRow).join('')}</div>`:'';
   $('#content').innerHTML=(sec('Money I lent',lent)+sec('Money I borrowed',bor)+sec('Settled',done))||`<div class="empty">No loans yet.<br>Tap + to add one.</div>`;
   document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===view));
@@ -228,7 +264,7 @@ function saveLoanForm(){
   if(!(amount>0)){toast('Enter an amount');return}
   if(!date){toast('Pick a date');return}
   if(ledit&&amount<paid(ledit)){toast('Less than already repaid');return}
-  const rec={dir:lf.dir,person,amount,note:$('#lnote').value.trim(),date};
+  const rec={dir:lf.dir,person,amount,note:$('#lnote').value.trim(),date,u:Date.now()};
   if(ledit)Object.assign(ledit,rec);else loans.push({id:Date.now(),...rec,payments:[]});
   saveLoans();$('#lsheet').hidden=true;ledit=null;render();
 }
@@ -281,7 +317,7 @@ function saveForm(){
   const date=$('#date').value;
   if(!(amount>0)){toast('Enter an amount');return}
   if(!date){toast('Pick a date');return}
-  const rec={type:form.type,cat:form.cat,amount:Math.round(amount*100)/100,note:$('#note').value.trim(),date};
+  const rec={type:form.type,cat:form.cat,amount:Math.round(amount*100)/100,note:$('#note').value.trim(),date,u:Date.now()};
   if(editing)Object.assign(editing,rec);else tx.push({id:Date.now(),...rec});
   save();closeSheet();
   if(view==='day')cursor=parse(date);render();
@@ -303,15 +339,15 @@ function importJson(file){
     try{
       const d=JSON.parse(r.result);
       const arr=Array.isArray(d)?d:(Array.isArray(d.tx)?d.tx:[]);
-      const ok=arr.filter(t=>t&&/^\d{4}-\d{2}-\d{2}$/.test(t.date)&&t.amount>0&&(t.type==='expense'||t.type==='income')).map((t,i)=>({id:t.id||Date.now()+i,type:t.type,cat:String(t.cat||'Other'),amount:Number(t.amount),note:String(t.note||''),date:t.date}));
+      const ok=arr.filter(t=>t&&/^\d{4}-\d{2}-\d{2}$/.test(t.date)&&t.amount>0&&(t.type==='expense'||t.type==='income')).map((t,i)=>({id:t.id||Date.now()+i,type:t.type,cat:String(t.cat||'Other'),amount:Number(t.amount),note:String(t.note||''),date:t.date,u:Number(t.u)||Date.now()}));
       const have=new Set(tx.map(t=>t.id));
       const add=ok.filter(t=>!have.has(t.id));
-      tx=tx.concat(add);save();
+      add.forEach(t=>delete gone['t_'+t.id]);tx=tx.concat(add);save();
       const dateOk=x=>/^\d{4}-\d{2}-\d{2}$/.test(x);
       const la=Array.isArray(d.loans)?d.loans:[];
       const haveL=new Set(loans.map(l=>l.id));
-      const addL=la.filter(l=>l&&String(l.person||'').trim()&&l.amount>0&&(l.dir==='lent'||l.dir==='borrowed')&&dateOk(l.date)).map((l,i)=>({id:l.id||Date.now()+1000+i,dir:l.dir,person:String(l.person).trim(),amount:Number(l.amount),note:String(l.note||''),date:l.date,payments:(Array.isArray(l.payments)?l.payments:[]).filter(p=>p&&p.amount>0&&dateOk(p.date)).map((p,j)=>({id:p.id||Date.now()+j,amount:Number(p.amount),date:p.date}))})).filter(l=>!haveL.has(l.id));
-      loans=loans.concat(addL);saveLoans();render();toast('Restored '+(add.length+addL.length)+' entries');
+      const addL=la.filter(l=>l&&String(l.person||'').trim()&&l.amount>0&&(l.dir==='lent'||l.dir==='borrowed')&&dateOk(l.date)).map((l,i)=>({id:l.id||Date.now()+1000+i,dir:l.dir,person:String(l.person).trim(),amount:Number(l.amount),note:String(l.note||''),date:l.date,u:Number(l.u)||Date.now(),payments:(Array.isArray(l.payments)?l.payments:[]).filter(p=>p&&p.amount>0&&dateOk(p.date)).map((p,j)=>({id:p.id||Date.now()+j,amount:Number(p.amount),date:p.date}))})).filter(l=>!haveL.has(l.id));
+      addL.forEach(l=>delete gone['l_'+l.id]);loans=loans.concat(addL);saveLoans();render();toast('Restored '+(add.length+addL.length)+' entries');
     }catch(e){toast('Not a valid backup file')}
   };
   r.readAsText(file);
@@ -320,11 +356,11 @@ function importJson(file){
 $('#prev').onclick=()=>shift(-1);
 $('#next').onclick=()=>shift(1);
 $('#fab').onclick=()=>view==='loans'?openLoanForm():openSheet();
-$('#more').onclick=()=>{$('#cursel').value=cur;$('#menu').hidden=false};
+$('#more').onclick=()=>{$('#cursel').value=cur;drawCloud();$('#menu').hidden=false};
 $('#closemenu').onclick=()=>$('#menu').hidden=true;
 $('#cancel').onclick=closeSheet;
 $('#save').onclick=saveForm;
-$('#del').onclick=()=>{if(editing&&confirm('Delete this entry?')){tx=tx.filter(t=>t!==editing);save();closeSheet();render()}};
+$('#del').onclick=()=>{if(editing&&confirm('Delete this entry?')){gone['t_'+editing.id]=Date.now();tx=tx.filter(t=>t!==editing);save();closeSheet();render()}};
 $('#seg').onclick=e=>{const b=e.target.closest('button');if(b){form.type=b.dataset.t;drawForm()}};
 $('#cats').onclick=e=>{const b=e.target.closest('button');if(b){form.cat=b.dataset.c;drawForm()}};
 $('#sheet').onclick=e=>{if(e.target.id==='sheet')closeSheet()};
@@ -353,23 +389,255 @@ $('#dsheet').onclick=e=>{
   const l=dcur;
   if(b.id==='dc'){$('#dsheet').hidden=true}
   else if(b.id==='de'){$('#dsheet').hidden=true;openLoanForm(l)}
-  else if(b.id==='dd'){if(confirm('Delete this loan and its repayments?')){loans=loans.filter(x=>x!==l);saveLoans();$('#dsheet').hidden=true;dcur=null;render()}}
+  else if(b.id==='dd'){if(confirm('Delete this loan and its repayments?')){gone['l_'+l.id]=Date.now();loans=loans.filter(x=>x!==l);saveLoans();$('#dsheet').hidden=true;dcur=null;render()}}
   else if(b.id==='psettle'){$('#pamt').value=left(l)}
   else if(b.id==='prec'){
     const a=Math.round(parseFloat(String($('#pamt').value).replace(/,/g,''))*100)/100,d=$('#pdate').value;
     if(!(a>0)){toast('Enter an amount');return}
     if(!d){toast('Pick a date');return}
     if(a>left(l)){toast('More than the balance');return}
-    l.payments.push({id:Date.now(),amount:a,date:d});
+    l.payments.push({id:Date.now(),amount:a,date:d});l.u=Date.now();
     saveLoans();drawDetail();render();
   }
-  else if(b.dataset.delpay){l.payments=l.payments.filter(x=>String(x.id)!==b.dataset.delpay);saveLoans();drawDetail();render()}
+  else if(b.dataset.delpay){l.payments=l.payments.filter(x=>String(x.id)!==b.dataset.delpay);l.u=Date.now();saveLoans();drawDetail();render()}
 };
 
-load();render();
+/* ================= CSV import ================= */
+function parseCsv(text,delim){
+  const rows=[];let row=[],f='',q=false;
+  text=text.replace(/^﻿/,'');
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(q){if(c==='"'){if(text[i+1]==='"'){f+='"';i++}else q=false}else f+=c}
+    else if(c==='"')q=true;
+    else if(c===delim){row.push(f);f=''}
+    else if(c==='\n'||c==='\r'){if(c==='\r'&&text[i+1]==='\n')i++;row.push(f);f='';if(row.some(x=>x.trim()!==''))rows.push(row);row=[]}
+    else f+=c;
+  }
+  row.push(f);if(row.some(x=>x.trim()!==''))rows.push(row);
+  return rows;
+}
+const num=s=>{if(s==null)return NaN;let t=String(s).trim();if(!t)return NaN;const neg=/\(.*\)/.test(t)||t.includes('-');t=t.replace(/[^0-9.]/g,'');if(!t)return NaN;const v=parseFloat(t);return neg?-v:v};
+function parseDate(s){
+  s=String(s||'').trim();let y,m,d,r;
+  if(r=s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})/)){y=+r[1];m=+r[2];d=+r[3]}
+  else if(r=s.match(/^(\d{1,2})[-\/. ](\d{1,2})[-\/. ](\d{2,4})/)){d=+r[1];m=+r[2];y=+r[3]}
+  else if(r=s.match(/^(\d{1,2})[-\/. ]*([A-Za-z]{3,9})[-\/. ,]*(\d{2,4})/)){d=+r[1];m=MON.findIndex(x=>x.toLowerCase()===r[2].slice(0,3).toLowerCase())+1;y=+r[3]}
+  else return null;
+  if(y<100)y+=2000;
+  const dt=new Date(y,m-1,d,12);
+  if(!(m>=1&&m<=12)||dt.getFullYear()!==y||dt.getMonth()!==m-1||dt.getDate()!==d)return null;
+  return iso(dt);
+}
+const CATRULES=[
+ ['Food',/\b(?:swiggy|zomato|restaurant|cafe|bakery|juice|tea|coffee|canteen|dominos|kfc|mcdonald|biryani|hotel|food|chai)/],
+ ['Transport',/\b(?:uber|ola\b|rapido|irctc|redbus|metro|petrol|fuel|hpcl|bpcl|iocl|ksrtc|fastag|taxi)/],
+ ['Bills',/\b(?:recharge|jio|airtel|vodafone|bsnl|electric|kseb|broadband|dth|insurance|bill)/],
+ ['Shopping',/\b(?:amazon|flipkart|myntra|meesho|ajio|mart\b|supermarket|store|mall)/],
+ ['Health',/\b(?:pharm|medical|hospital|clinic|apollo|medplus|dental)/],
+ ['Fun',/\b(?:netflix|spotify|hotstar|prime|bookmyshow|pvr|steam|youtube|movie|game)/],
+ ['Education',/\b(?:udemy|coursera|college|school|exam|ktu|book)/],
+ ['Rent',/\brent\b/]
+];
+const guessCat=(type,text)=>{const t=text.toLowerCase();if(type==='income')return /salary|payroll/.test(t)?'Salary':'Other';for(const [c,re] of CATRULES)if(re.test(t))return c;return 'Other'};
+function cleanNote(s){
+  s=String(s||'').replace(/\s+/g,' ').trim();
+  if(/^upi/i.test(s)){
+    const parts=s.split(/[\/\-]/).map(x=>x.trim()).filter(x=>x&&!/^\d+$/.test(x)&&!/^(upi|dr|cr|debit|credit|payment|paid|to|from)$/i.test(x)&&!/@/.test(x)&&!/^[A-Z0-9]{10,}$/.test(x));
+    if(parts[0])s=parts[0];
+  }
+  return s.slice(0,80);
+}
+function csvToTx(text){
+  const first=text.split(/\r?\n/).slice(0,20).join('\n');
+  const delim=[',',';','\t','|'].map(d=>[d,first.split(d).length]).sort((a,b)=>b[1]-a[1])[0][0];
+  const rows=parseCsv(text,delim);
+  let h=-1;
+  for(let i=0;i<Math.min(rows.length,40);i++){
+    const c=rows[i].map(x=>x.trim().toLowerCase());
+    if(c.some(x=>/date/.test(x))&&c.some(x=>/amount|debit|credit|withdraw|deposit|\bdr\b|\bcr\b/.test(x))){h=i;break}
+  }
+  if(h<0)return {error:'Could not find a header row with Date and Amount/Debit/Credit columns.'};
+  const head=rows[h].map(x=>x.trim().toLowerCase());
+  const dates=head.map((x,i)=>/date/.test(x)?i:-1).filter(i=>i>=0);
+  const dI=dates.find(i=>/txn|trans|tran/.test(head[i]))??dates.find(i=>!/value/.test(head[i]))??dates[0];
+  const typeI=head.findIndex(x=>/^(dr\s*\/\s*cr|cr\s*\/\s*dr|type|txn type|transaction type|debit\s*\/\s*credit|credit\s*\/\s*debit)$/.test(x));
+  const debI=head.findIndex((x,i)=>i!==typeI&&/debit|withdraw|paid out|money out/.test(x));
+  const crI=head.findIndex((x,i)=>i!==typeI&&/credit|deposit|paid in|money in/.test(x));
+  const amtI=head.findIndex((x,i)=>i!==typeI&&i!==debI&&i!==crI&&/amount/.test(x));
+  let descI=head.findIndex((x,i)=>i!==dI&&/narration|description|details|particulars|merchant|remarks|payee|title/.test(x));
+  if(descI<0)descI=head.findIndex((x,i)=>i!==dI&&i!==debI&&i!==crI&&i!==amtI&&i!==typeI);
+  if(debI<0&&crI<0&&amtI<0)return {error:'Could not find an amount column.'};
+  const out=[];let skipped=0;
+  for(let k=h+1;k<rows.length;k++){
+    const r=rows[k];
+    const date=parseDate(r[dI]);
+    if(!date){skipped++;continue}
+    let type,amount;
+    if(debI>=0||crI>=0){
+      const dv=num(r[debI]),cv=num(r[crI]);
+      if(dv>0){type='expense';amount=dv}else if(cv>0){type='income';amount=cv}else{skipped++;continue}
+    }else{
+      const raw=String(r[amtI]||''),v=num(raw);
+      if(!isFinite(v)||v===0){skipped++;continue}
+      const tt=(typeI>=0?String(r[typeI]):'')+' '+raw;
+      if(/\b(dr|debit|withdrawal)\b/i.test(tt))type='expense';
+      else if(/\b(cr|credit|deposit)\b/i.test(tt))type='income';
+      else type=v<0?'expense':'income';
+      amount=Math.abs(v);
+    }
+    amount=Math.round(amount*100)/100;
+    const desc=descI>=0?String(r[descI]||''):'';
+    out.push({type,cat:guessCat(type,desc),amount,note:cleanNote(desc),date});
+  }
+  return {rows:out,skipped};
+}
+function importCsvText(text,ask=true){
+  const res=csvToTx(text);
+  if(res.error){toast(res.error);return res}
+  const seen={};
+  tx.forEach(t=>{const k=t.date+'|'+t.type+'|'+t.amount;seen[k]=(seen[k]||0)+1});
+  const add=[];let dup=0;
+  res.rows.forEach(t=>{const k=t.date+'|'+t.type+'|'+t.amount;if(seen[k]>0){seen[k]--;dup++}else add.push(t)});
+  const exp=add.filter(t=>t.type==='expense'),inc=add.filter(t=>t.type==='income');
+  const S=a=>a.reduce((x,t)=>x+t.amount,0);
+  res.summary={found:res.rows.length,added:add.length,dup,skipped:res.skipped};
+  if(!add.length){toast(dup?'Nothing new: all '+dup+' already in the app':'No transactions found');return res}
+  const dates=add.map(t=>t.date).sort();
+  if(ask&&!confirm(`Import ${add.length} new transactions (${dates[0]} to ${dates[dates.length-1]})?\n\n${exp.length} expenses: ${money(S(exp))}\n${inc.length} income: ${money(S(inc))}\n${dup} already in the app will be skipped.\n\nDebits become expenses, credits become income.`))return res;
+  const now=Date.now();
+  add.forEach((t,i)=>tx.push({id:now+i,...t,u:now}));
+  save();render();toast('Imported '+add.length+' transactions');
+  return res;
+}
+function importCsvFile(file){const r=new FileReader();r.onload=()=>importCsvText(String(r.result));r.readAsText(file)}
+
+/* ================= Cloud sync (Firebase) ================= */
+const FBV='10.14.1',DRE=/^\d{4}-\d{2}-\d{2}$/;
+let fb=null,fuser=null,unsub=null,cloudU={},syncMsg='',synced=false,initing=false;
+const cfgOn=()=>!!(window.LEDGER_FIREBASE&&window.LEDGER_FIREBASE.apiKey);
+const hm=()=>new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+function loadScript(src){return new Promise((res,rej)=>{const e=document.createElement('script');e.src=src;e.onload=res;e.onerror=()=>rej(new Error('load'));document.head.appendChild(e)})}
+async function cloudInit(){
+  if(!cfgOn()||fb||initing)return;
+  initing=true;
+  try{
+    if(!window.firebase){
+      if(!navigator.onLine){syncMsg='Offline. Sync resumes when you are back online.';drawCloud();return}
+      try{
+        const base='https://www.gstatic.com/firebasejs/'+FBV+'/';
+        await loadScript(base+'firebase-app-compat.js');
+        await Promise.all([loadScript(base+'firebase-auth-compat.js'),loadScript(base+'firebase-firestore-compat.js')]);
+      }catch(e){syncMsg='Could not load the sync library.';drawCloud();return}
+    }
+    try{
+      window.firebase.initializeApp(window.LEDGER_FIREBASE);
+      fb={auth:window.firebase.auth(),db:window.firebase.firestore()};
+      fb.auth.onAuthStateChanged(u=>{
+        if(u){
+          let last=null;try{last=localStorage.getItem('ledger.uid')}catch(e){}
+          if(last&&last!==u.uid&&(tx.length||loans.length)&&!confirm('This phone has data from a different account. Add it to this account?')){fb.auth.signOut();return}
+          try{localStorage.setItem('ledger.uid',u.uid)}catch(e){}
+          fuser=u;startSync();
+        }else{fuser=null;stopSync()}
+        drawCloud();
+      });
+    }catch(e){fb=null;syncMsg='Sync setup error: '+(e.code||e.message);}
+  }finally{initing=false;drawCloud()}
+}
+const colRef=()=>fb.db.collection('users').doc(fuser.uid).collection('records');
+function stopSync(){if(unsub){unsub();unsub=null}cloudU={};synced=false}
+function startSync(){
+  stopSync();
+  syncMsg='Syncing…';
+  unsub=colRef().onSnapshot(snap=>{
+    let changed=false;
+    snap.docChanges().forEach(ch=>{if(ch.type!=='removed'&&applyRemote(ch.doc.id,ch.doc.data()))changed=true});
+    synced=true;
+    if(changed){persist();render();if(!$('#dsheet').hidden&&dcur){dcur=loans.find(l=>String(l.id)===String(dcur.id))||null;dcur?drawDetail():$('#dsheet').hidden=true}}
+    syncMsg='Synced '+hm();drawCloud();
+    pushLocal();
+  },err=>{syncMsg='Sync error: '+(err.code||err.message);drawCloud()});
+}
+function cleanTx(r,id,u){
+  if(!r||(r.type!=='expense'&&r.type!=='income')||!(r.amount>0)||!DRE.test(r.date||''))return null;
+  return {id,type:r.type,cat:String(r.cat||'Other'),amount:Number(r.amount),note:String(r.note||''),date:r.date,u};
+}
+function cleanLoan(r,id,u){
+  if(!r||(r.dir!=='lent'&&r.dir!=='borrowed')||!String(r.person||'').trim()||!(r.amount>0)||!DRE.test(r.date||''))return null;
+  return {id,dir:r.dir,person:String(r.person).trim(),amount:Number(r.amount),note:String(r.note||''),date:r.date,u,
+    payments:(Array.isArray(r.payments)?r.payments:[]).filter(p=>p&&p.amount>0&&DRE.test(p.date||'')).map((p,j)=>({id:p.id||Date.now()+j,amount:Number(p.amount),date:p.date}))};
+}
+function applyRemote(docId,d){
+  if(!d||(d.k!=='t'&&d.k!=='l'))return false;
+  const rid=docId.slice(2),id=/^\d+$/.test(rid)?Number(rid):rid;
+  const u=Number(d.u)||0;
+  cloudU[docId]=Math.max(cloudU[docId]??-1,u);
+  const arr=d.k==='t'?tx:loans;
+  const i=arr.findIndex(r=>String(r.id)===rid);
+  if(d.deleted){
+    gone[docId]=Math.max(gone[docId]||0,u);
+    if(i>=0&&(arr[i].u||0)<=u){arr.splice(i,1);return true}
+    return false;
+  }
+  if(docId in gone&&gone[docId]>=u)return false;
+  const rec=d.k==='t'?cleanTx(d.r,id,u):cleanLoan(d.r,id,u);
+  if(!rec)return false;
+  if(i<0){delete gone[docId];arr.push(rec);return true}
+  if((arr[i].u||0)<u){arr[i]=rec;delete gone[docId];return true}
+  return false;
+}
+function pushLocal(){
+  if(!fb||!fuser||!synced)return;
+  const col=colRef(),ops=[];
+  const add=(id,data,u)=>{if(u>(cloudU[id]??-1)){ops.push([id,data]);cloudU[id]=u}};
+  tx.forEach(r=>add('t_'+r.id,{k:'t',u:r.u||0,deleted:false,r:JSON.parse(JSON.stringify(r))},r.u||0));
+  loans.forEach(r=>add('l_'+r.id,{k:'l',u:r.u||0,deleted:false,r:JSON.parse(JSON.stringify(r))},r.u||0));
+  Object.keys(gone).forEach(id=>add(id,{k:id[0],u:gone[id],deleted:true},gone[id]));
+  for(let i=0;i<ops.length;i+=400){
+    const chunk=ops.slice(i,i+400),b=fb.db.batch();
+    chunk.forEach(([id,data])=>b.set(col.doc(id),data));
+    b.commit().then(()=>{syncMsg='Synced '+hm();drawCloud()}).catch(e=>{chunk.forEach(([id])=>delete cloudU[id]);syncMsg='Sync failed: '+(e.code||e.message);drawCloud()});
+  }
+}
+const authMsg=e=>{
+  const c=e&&e.code||'';
+  if(/invalid-credential|wrong-password|user-not-found|invalid-email/.test(c))return 'Wrong email or password';
+  if(/email-already-in-use/.test(c))return 'Account exists. Use Sign in';
+  if(/weak-password/.test(c))return 'Password needs 6+ characters';
+  if(/popup-closed|cancelled-popup/.test(c))return 'Sign-in cancelled';
+  if(/unauthorized-domain/.test(c))return 'Add this site to Authorized domains in Firebase';
+  if(/operation-not-allowed/.test(c))return 'Enable this sign-in method in Firebase';
+  if(/network/.test(c))return 'No network';
+  return 'Sign-in failed'+(c?': '+c:'');
+};
+function drawCloud(){
+  const el=$('#cloud');if(!el)return;
+  if(!cfgOn()){el.innerHTML='<div class="note"><b>Cloud sync</b> is off. Add your Firebase config to config.js to turn it on. Data stays on this phone for now.</div>';return}
+  if(!fb){el.innerHTML=`<div class="note"><b>Cloud sync</b> ${esc(syncMsg||'is starting…')}</div><div class="btns"><button data-a="retry">Retry</button></div>`;return}
+  if(!fuser){el.innerHTML='<div class="note"><b>Cloud sync</b>: sign in to back up and sync across devices.</div><input id="cemail" type="email" placeholder="Email" autocomplete="email"><input id="cpass" type="password" placeholder="Password" autocomplete="current-password"><div class="btns"><button data-a="signin" class="primary">Sign in</button><button data-a="signup">Create account</button></div><div class="btns"><button data-a="google">Continue with Google</button></div>';return}
+  el.innerHTML=`<div class="note"><b>Cloud sync</b> on · ${esc(fuser.email||'signed in')}<br>${esc(syncMsg||'Syncing…')}</div><div class="btns"><button data-a="sync">Sync now</button><button data-a="signout">Sign out</button></div>`;
+}
+$('#cloud').onclick=async e=>{
+  const b=e.target.closest('button');if(!b)return;
+  const a=b.dataset.a;
+  try{
+    if(a==='retry')await cloudInit();
+    else if(a==='signin')await fb.auth.signInWithEmailAndPassword($('#cemail').value.trim(),$('#cpass').value);
+    else if(a==='signup')await fb.auth.createUserWithEmailAndPassword($('#cemail').value.trim(),$('#cpass').value);
+    else if(a==='google')await fb.auth.signInWithPopup(new window.firebase.auth.GoogleAuthProvider());
+    else if(a==='sync'){startSync();toast('Syncing…')}
+    else if(a==='signout'){await fb.auth.signOut();toast('Signed out. Data stays on this phone')}
+  }catch(err){toast(authMsg(err))}
+};
+$('#csvbtn').onclick=()=>$('#csvfile').click();
+$('#csvfile').onchange=e=>{if(e.target.files[0])importCsvFile(e.target.files[0]);e.target.value=''};
+
+load();render();cloudInit();
+window.addEventListener('online',()=>{if(fb&&fuser)startSync();else cloudInit()});
 try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist()}catch(e){}
 if('serviceWorker' in navigator&&location.protocol.startsWith('http'))navigator.serviceWorker.register('sw.js').catch(()=>{});
-window.__ledger={get tx(){return tx},get loans(){return loans},setView,shift,openSheet,saveForm};
+window.__ledger={get tx(){return tx},get loans(){return loans},get gone(){return gone},setView,shift,goto:d=>{cursor=parse(d);view='day';render()},openSheet,saveForm,csvToTx,importCsvText,get cloud(){return {fb,fuser,cloudU,synced}}};
 })();
 </script>
 </body>
